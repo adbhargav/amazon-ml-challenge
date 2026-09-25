@@ -17,3 +17,10 @@ __pycache__/
 .pytest_cache/
 .venv/
 synthetic_data/
+# real-data run layout (scripts/run_real.sh)
+dataset_small/
+dataset_shards/
+work_shards/
+output_shards/
+student_resource/
+.DS_Store

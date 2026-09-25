@@ -133,9 +133,20 @@ def apply_rule(s1: np.ndarray, cand: np.ndarray, p: np.ndarray, params: Dict, cf
 
 
 def tune(s1: np.ndarray, cand: np.ndarray, p: np.ndarray, gt_pairs: np.ndarray, s1_ids: np.ndarray, cfg) -> Tuple[Dict, Dict]:
-    """Grid-search decision parameters on OOF predictions. Returns (best_params, all_results)."""
+    """Grid-search decision parameters on OOF predictions. Returns (best_params, all_results).
+
+    The metric is a mean over S1 entities, so the search runs on a random sample of
+    at most ``cfg.tune_max_s1`` entities (standard error ~0.001 at 200k).
+    """
     results = {}
     best, best_score = None, -1.0
+    if len(s1_ids) > cfg.tune_max_s1:
+        rng = np.random.default_rng(cfg.seed)
+        s1_ids = np.sort(rng.choice(s1_ids, size=cfg.tune_max_s1, replace=False))
+        keep_pairs = np.isin(s1, s1_ids)
+        s1, cand, p = s1[keep_pairs], cand[keep_pairs], p[keep_pairs]
+        gt_pairs = gt_pairs[np.isin(gt_pairs[:, 0], s1_ids)]
+        log.info("decision tuning on a sample of %d S1 (%d pairs)", len(s1_ids), len(s1))
 
     def score(params):
         keep = apply_rule(s1, cand, p, params, cfg)

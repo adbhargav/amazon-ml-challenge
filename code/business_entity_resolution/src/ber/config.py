@@ -78,6 +78,7 @@ class Config:
     decision_rule: str = "auto"         # "expected_f" | "threshold" | "auto"
     threshold: float = 0.5              # used when decision_rule == "threshold"
     expected_f_samples: int = 256
+    tune_max_s1: int = 200_000          # decision grid search runs on a random sample of this many S1
     max_matches_per_s1: int = 12        # GT never exceeds 11
 
     # ---- misc --------------------------------------------------------------------

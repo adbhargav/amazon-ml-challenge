@@ -121,7 +121,10 @@ def _eq_or_missing(a: np.ndarray, b: np.ndarray) -> np.ndarray:
     return out
 
 
-def cheap_features(pairs: pl.DataFrame, e1: Enc, e2: Enc, idfs: Dict[str, np.ndarray]) -> pl.DataFrame:
+def cheap_features(pairs: pl.DataFrame, e1: Enc, e2: Enc, idfs: Dict[str, np.ndarray],
+                   s1_counts: np.ndarray | None = None) -> pl.DataFrame:
+    """``s1_counts``: candidates per S1 over the *whole* pair table (bincount of s1); when
+    None it is computed from ``pairs`` (only right if ``pairs`` is the whole table)."""
     ia = pairs["s1"].to_numpy().astype(np.int64)
     ib = pairs["cand"].to_numpy().astype(np.int64)
     f: Dict[str, np.ndarray] = {}
@@ -146,7 +149,8 @@ def cheap_features(pairs: pl.DataFrame, e1: Enc, e2: Enc, idfs: Dict[str, np.nda
     f["nk_cnt_city"] = e1.nk_cnt_city[ia]
     f["nk_cnt_pool_city"] = e1.nk_cnt_pool_city[ia]
     # candidates per S1 in the union
-    s1_counts = np.bincount(ia, minlength=e1.n)
+    if s1_counts is None:
+        s1_counts = np.bincount(ia, minlength=e1.n)
     f["n_cands_union"] = np.log1p(s1_counts[ia]).astype(np.float32)
     return pl.DataFrame({k: v.astype(np.float32) for k, v in f.items()})
 
@@ -182,16 +186,17 @@ def _hn_features(e1: Enc, e2: Enc, ia: np.ndarray, ib: np.ndarray, s1n: pl.DataF
     diff = np.abs(h1 - h2).astype(np.float64)
     f["hn_absdiff_log"] = np.where(both, np.log1p(diff), np.nan).astype(np.float32)
     f["hn_close"] = np.where(both, (diff <= 5).astype(np.float32), np.nan).astype(np.float32)
-    s1h = np.asarray(s1n["a_hn"].to_list(), dtype=object)[ia]
-    ch = np.asarray(pooln["a_hn"].to_list(), dtype=object)[ib]
+    s1h = s1n["a_hn"].gather(ia).to_numpy().astype(object)
+    ch = pooln["a_hn"].gather(ib).to_numpy().astype(object)
     lev = np.full(len(ia), np.nan, dtype=np.float32)
     if both.any():
         lev[both] = _cpdist(s1h[both], ch[both], Levenshtein.normalized_similarity, n_jobs, chunk)
     f["hn_digit_sim"] = lev
     pre = np.full(len(ia), np.nan, dtype=np.float32)
     if both.any():
-        a, b = s1h[both], ch[both]
-        pre[both] = np.array([1.0 if (x != y and (x.startswith(y) or y.startswith(x) or x.endswith(y) or y.endswith(x))) else 0.0 for x, y in zip(a, b)], dtype=np.float32)
+        a, b = s1h[both].astype(str), ch[both].astype(str)
+        rel = (a != b) & (np.char.startswith(a, b) | np.char.startswith(b, a) | np.char.endswith(a, b) | np.char.endswith(b, a))
+        pre[both] = rel.astype(np.float32)
     f["hn_prefix"] = pre
     f["hn_suffix_eq"] = _eq_or_missing(e1.codes["a_hn_suffix"][ia], e2.codes["a_hn_suffix"][ib])
     f["unit_eq"] = _eq_or_missing(e1.codes["a_unit"][ia], e2.codes["a_unit"][ib])
@@ -199,18 +204,21 @@ def _hn_features(e1: Enc, e2: Enc, ia: np.ndarray, ib: np.ndarray, s1n: pl.DataF
 
 
 def full_features(pairs: pl.DataFrame, s1n: pl.DataFrame, pooln: pl.DataFrame, e1: Enc, e2: Enc,
-                  idfs: Dict[str, np.ndarray], cfg) -> pl.DataFrame:
+                  idfs: Dict[str, np.ndarray], cfg, s1_counts: np.ndarray | None = None) -> pl.DataFrame:
+    """Full feature block for ``pairs`` (call per chunk; ``s1_counts`` = bincount of s1 over all pairs)."""
     ia = pairs["s1"].to_numpy().astype(np.int64)
     ib = pairs["cand"].to_numpy().astype(np.int64)
     n_jobs, chunk = cfg.n_jobs, cfg.chunk_rows
-    cheap = cheap_features(pairs, e1, e2, idfs)
+    if s1_counts is None:
+        s1_counts = np.bincount(ia, minlength=e1.n)
+    cheap = cheap_features(pairs, e1, e2, idfs, s1_counts)
     f: Dict[str, np.ndarray] = {c: cheap[c].to_numpy() for c in cheap.columns}
     if "prune_p" in pairs.columns:
         f["prune_p"] = pairs["prune_p"].to_numpy().astype(np.float32)
         f["prune_rank"] = pairs["prune_rank"].to_numpy().astype(np.float32)
 
     def col(df: pl.DataFrame, c: str, idx: np.ndarray) -> np.ndarray:
-        return np.asarray(df[c].to_list(), dtype=object)[idx]
+        return df[c].gather(idx).to_numpy().astype(object)
 
     s1_core, c_core = col(s1n, "n_core", ia), col(pooln, "n_core", ib)
     s1_full, c_full = col(s1n, "n_full", ia), col(pooln, "n_full", ib)
@@ -272,6 +280,5 @@ def full_features(pairs: pl.DataFrame, s1n: pl.DataFrame, pooln: pl.DataFrame, e
     f["x_name_addr"] = (f["nm_best_tsr"] / 100.0) * np.nan_to_num(f["ad_jac"], nan=0.0)
     f["x_hn_street"] = np.nan_to_num(f["hn_eq"], nan=0.0) * np.nan_to_num(f["st_jac"], nan=0.0)
     f["x_name_hn"] = (f["nm_best_tsr"] / 100.0) * np.nan_to_num(f["hn_eq"], nan=0.5)
-    s1_counts = np.bincount(ia, minlength=e1.n)
     f["n_cands"] = s1_counts[ia].astype(np.float32)
     return pl.DataFrame({k: np.asarray(v, dtype=np.float32) for k, v in f.items()})

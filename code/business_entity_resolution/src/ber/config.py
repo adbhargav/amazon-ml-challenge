@@ -52,6 +52,7 @@ class Config:
     prune_top_k: int = 20
     prune_min_p: float = 0.003
     prune_num_rounds: int = 400
+    prune_max_train_pairs: Optional[int] = 20_000_000   # subsample (all positives kept) for the pruner
 
     # ---- stage-1 / stage-2 GBDT ---------------------------------------------
     gbdt_params: dict = field(default_factory=lambda: dict(
@@ -69,7 +70,7 @@ class Config:
     ))
     gbdt_num_rounds: int = 3000
     gbdt_early_stopping: int = 100
-    gbdt_max_train_pairs: Optional[int] = 25_000_000   # subsample if larger
+    gbdt_max_train_pairs: Optional[int] = 15_000_000   # subsample (all positives kept) for stage-1/2
 
     # ---- decision ------------------------------------------------------------
     one_to_one: bool = True

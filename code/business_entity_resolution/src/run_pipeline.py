@@ -34,7 +34,8 @@ from ber.decide import apply_rule, load_params, save_params, tune  # noqa: E402
 from ber.encode import encode, load_enc, save_enc  # noqa: E402
 from ber.io_utils import gt_to_pairs, load_parquet, load_split, save_parquet, timer  # noqa: E402
 from ber.metrics import macro_f05_from_pairs  # noqa: E402
-from ber.models import feature_importance, load_models, predict_models, save_models, train_oof  # noqa: E402
+from ber.models import feature_importance, load_models, predict_models, predict_oof, save_models, subsample_rows, train_folds  # noqa: E402
+from ber.store import FeatureStore  # noqa: E402
 from ber.normalize import Normalizer  # noqa: E402
 from ber.pair_features import cheap_features, full_features  # noqa: E402
 from ber.splits import assign_splits  # noqa: E402
@@ -165,36 +166,76 @@ def stage_block(cfg: Config) -> None:
     _report(cfg, "blocking", rec)
 
 
+def _row_chunks(n: int, size: int):
+    for a in range(0, n, size):
+        yield a, min(n, a + size)
+
+
+def _fit_and_score(cfg: Config, store: FeatureStore, y: np.ndarray, fold: np.ndarray, s1: np.ndarray, tag: str,
+                   params: dict, rounds: int, max_train: int | None, extra: np.ndarray | None = None,
+                   extra_names: list | None = None) -> tuple[np.ndarray, list, list]:
+    """Train fold models on a subsample (train mode) or load them (test mode), then score
+    every row chunk by chunk.  ``extra`` = additional dense columns aligned with the store rows."""
+    names = list(store.columns) + (list(extra_names) if extra_names else [])
+    n = len(y)
+
+    def block(df: pl.DataFrame, rows_or_slice) -> np.ndarray:
+        X = _matrix(df)
+        if extra is not None:
+            X = np.concatenate([X, extra[rows_or_slice].astype(np.float32)], axis=1)
+        return X
+
+    if cfg.mode == "train":
+        rows = subsample_rows(y, max_train, cfg.seed)
+        with timer(f"[{tag}] gathering {len(rows)} training rows"):
+            X_sub = block(store.gather(rows), rows)
+        with timer(f"[{tag}] training {cfg.n_folds} fold models"):
+            models = train_folds(X_sub, y[rows], fold[rows], s1[rows], cfg, params, rounds, tag, names)
+        del X_sub
+        save_models(models, cfg.models_dir, tag, names)
+    else:
+        models, names_saved = load_models(cfg.models_dir, tag)
+        assert list(names_saved) == names, f"{tag}: feature mismatch between train and test"
+    p = np.empty(n, dtype=np.float32)
+    with timer(f"[{tag}] scoring {n} pairs"):
+        for off, df in store.iter_parts():
+            sl = slice(off, off + df.height)
+            X = block(df, sl)
+            p[sl] = predict_oof(models, X, fold[sl]) if cfg.mode == "train" else predict_models(models, X)
+    return p, models, names
+
+
 def stage_prune(cfg: Config) -> None:
     pairs = load_parquet(cfg.work / "pairs_union.parquet")
     e1, e2, idfs = load_enc(cfg.work / "enc.npz")
-    with timer("cheap features"):
-        X_df = cheap_features(pairs, e1, e2, idfs)
-    names = X_df.columns
-    X = _matrix(X_df)
     s1 = pairs["s1"].to_numpy().astype(np.int64)
+    counts = np.bincount(s1, minlength=e1.n)
+    store = FeatureStore(cfg.work / "prune_feats").reset()
+    with timer(f"cheap features on {pairs.height} union pairs"):
+        for i, (a, b) in enumerate(_row_chunks(pairs.height, cfg.chunk_rows)):
+            store.write_part(i, cheap_features(pairs[a:b], e1, e2, idfs, counts))
     gt = _load_gt(cfg)
+    y = pair_labels(pairs, gt) if cfg.mode == "train" else np.zeros(pairs.height, dtype=np.int8)
+    fold = _fold_of_s1(cfg, e1.n)[s1]
+    params = dict(cfg.gbdt_params, num_leaves=63, min_data_in_leaf=100, learning_rate=0.1)
+    p, models, names = _fit_and_score(cfg, store, y.astype(np.float32), fold, s1, "prune", params,
+                                      cfg.prune_num_rounds, cfg.prune_max_train_pairs)
     if cfg.mode == "train":
-        y = pair_labels(pairs, gt)
-        params = dict(cfg.gbdt_params, num_leaves=63, min_data_in_leaf=100, learning_rate=0.1)
-        with timer("training prune model (OOF)"):
-            p, models = train_oof(X, y.astype(np.float32), _fold_of_s1(cfg, e1.n), s1, cfg, params, cfg.prune_num_rounds, "prune", names)
-        save_models(models, cfg.models_dir, "prune", names)
         _report(cfg, "prune_model", {"oof_auc": float(roc_auc_score(y, p)), "oof_ap": float(average_precision_score(y, p)),
                                      "importance": feature_importance(models, names, 15)})
-    else:
-        models, names_saved = load_models(cfg.models_dir, "prune")
-        assert list(names_saved) == list(names), "prune feature mismatch between train and test"
-        with timer("scoring prune model"):
-            p = predict_models(models, X)
-        y = np.zeros(len(p), dtype=np.int8)
-    pairs = pairs.with_columns([pl.Series("prune_p", p.astype(np.float32)), pl.Series("y", y)])
+    pairs = pairs.with_columns([pl.Series("prune_p", p.astype(np.float32)), pl.Series("y", y.astype(np.int8))])
     pairs = pairs.sort(["s1", "prune_p"], descending=[False, True]).with_columns(pl.int_range(pl.len()).over("s1").cast(pl.Int16).alias("prune_rank"))
     cands = pairs.filter((pl.col("prune_rank") < cfg.prune_top_k) & (pl.col("prune_p") >= cfg.prune_min_p))
     save_parquet(cands, cfg.work / "candidates.parquet")
     queried = _queried_mask(cfg, e1.n)
     rec = blocking_recall(cands, gt, queried)
     rec["n_pairs_before"] = pairs.height
+    if cfg.mode == "train" and gt is not None:
+        # recall at several K to guide prune_top_k
+        rec["recall_at_k"] = {}
+        for k in (5, 10, 15, 20, 30):
+            sub = pairs.filter((pl.col("prune_rank") < k) & (pl.col("prune_p") >= cfg.prune_min_p))
+            rec["recall_at_k"][str(k)] = blocking_recall(sub, gt, queried)["blocking_recall"]
     _report(cfg, "candidates", rec)
 
 
@@ -203,37 +244,36 @@ def stage_features(cfg: Config) -> None:
     s1n = load_parquet(cfg.work / "s1_norm.parquet")
     pooln = load_parquet(cfg.work / "pool_norm.parquet")
     e1, e2, idfs = load_enc(cfg.work / "enc.npz")
+    counts = np.bincount(cands["s1"].to_numpy().astype(np.int64), minlength=e1.n)
+    store = FeatureStore(cfg.work / "features").reset()
     with timer(f"full features on {cands.height} candidate pairs"):
-        F = full_features(cands, s1n, pooln, e1, e2, idfs, cfg)
-    save_parquet(F, cfg.work / "features.parquet")
+        for i, (a, b) in enumerate(_row_chunks(cands.height, cfg.chunk_rows)):
+            store.write_part(i, full_features(cands[a:b], s1n, pooln, e1, e2, idfs, cfg, counts))
+            log.info("  features chunk %d: rows %d-%d", i, a, b)
+
+
+def _cand_arrays(cfg: Config):
+    cands = load_parquet(cfg.work / "candidates.parquet")
+    n_s1 = int(load_parquet(cfg.work / "s1.parquet").height)
+    s1 = cands["s1"].to_numpy().astype(np.int64)
+    y = cands["y"].to_numpy().astype(np.float32)
+    fold = _fold_of_s1(cfg, n_s1)[s1]
+    return cands, s1, y, fold
 
 
 def stage_stage1(cfg: Config) -> None:
-    cands = load_parquet(cfg.work / "candidates.parquet")
-    F = load_parquet(cfg.work / "features.parquet")
-    names = F.columns
-    X = _matrix(F)
-    s1 = cands["s1"].to_numpy().astype(np.int64)
-    y = cands["y"].to_numpy().astype(np.float32)
-    n_s1 = int(load_parquet(cfg.work / "s1.parquet").height)
+    cands, s1, y, fold = _cand_arrays(cfg)
+    store = FeatureStore(cfg.work / "features")
+    p1, models, names = _fit_and_score(cfg, store, y, fold, s1, "stage1", cfg.gbdt_params, cfg.gbdt_num_rounds, cfg.gbdt_max_train_pairs)
     if cfg.mode == "train":
-        with timer("training stage-1 model (OOF)"):
-            p1, models = train_oof(X, y, _fold_of_s1(cfg, n_s1), s1, cfg, cfg.gbdt_params, cfg.gbdt_num_rounds, "stage1", names)
-        save_models(models, cfg.models_dir, "stage1", names)
         _report(cfg, "stage1", {"oof_auc": float(roc_auc_score(y, p1)), "oof_ap": float(average_precision_score(y, p1)),
                                 "oof_logloss": float(log_loss(y, np.clip(p1, 1e-6, 1 - 1e-6))),
                                 "importance": feature_importance(models, names, 30)})
-    else:
-        models, names_saved = load_models(cfg.models_dir, "stage1")
-        assert list(names_saved) == list(names), "stage-1 feature mismatch between train and test"
-        with timer("scoring stage-1 model"):
-            p1 = predict_models(models, X)
     np.save(cfg.work / "p1.npy", p1.astype(np.float32))
 
 
 def stage_context(cfg: Config) -> None:
-    cands = load_parquet(cfg.work / "candidates.parquet")
-    F = load_parquet(cfg.work / "features.parquet")
+    cands, s1, y, fold = _cand_arrays(cfg)
     p1 = np.load(cfg.work / "p1.npy")
     s1n = load_parquet(cfg.work / "s1_norm.parquet")
     pooln = load_parquet(cfg.work / "pool_norm.parquet")
@@ -241,15 +281,13 @@ def stage_context(cfg: Config) -> None:
     with timer("context features"):
         C = context_features(cands, p1, s1n, pooln, e1, e2, idfs, cfg)
     save_parquet(C, cfg.work / "context.parquet")
-    X = np.concatenate([_matrix(F), _matrix(C)], axis=1)
-    names = list(F.columns) + list(C.columns)
-    s1 = cands["s1"].to_numpy().astype(np.int64)
-    y = cands["y"].to_numpy().astype(np.float32)
-    n_s1 = int(load_parquet(cfg.work / "s1.parquet").height)
+    C_names = list(C.columns)
+    C_arr = _matrix(C)
+    del C
+    store = FeatureStore(cfg.work / "features")
+    p2, models, names = _fit_and_score(cfg, store, y, fold, s1, "stage2", cfg.gbdt_params, cfg.gbdt_num_rounds,
+                                       cfg.gbdt_max_train_pairs, extra=C_arr, extra_names=C_names)
     if cfg.mode == "train":
-        with timer("training stage-2 (context) model (OOF)"):
-            p2, models = train_oof(X, y, _fold_of_s1(cfg, n_s1), s1, cfg, cfg.gbdt_params, cfg.gbdt_num_rounds, "stage2", names)
-        save_models(models, cfg.models_dir, "stage2", names)
         iso = IsotonicRegression(out_of_bounds="clip", y_min=0.0, y_max=1.0).fit(p2, y)
         joblib.dump(iso, cfg.models_dir / "isotonic.joblib")
         p_cal = iso.predict(p2).astype(np.float32)
@@ -258,10 +296,6 @@ def stage_context(cfg: Config) -> None:
                                 "oof_logloss_calibrated": float(log_loss(y, np.clip(p_cal, 1e-6, 1 - 1e-6))),
                                 "importance": feature_importance(models, names, 30)})
     else:
-        models, names_saved = load_models(cfg.models_dir, "stage2")
-        assert list(names_saved) == list(names), "stage-2 feature mismatch between train and test"
-        with timer("scoring stage-2 model"):
-            p2 = predict_models(models, X)
         iso = joblib.load(cfg.models_dir / "isotonic.joblib")
         p_cal = iso.predict(p2).astype(np.float32)
     np.save(cfg.work / "p2.npy", p2.astype(np.float32))

@@ -137,8 +137,9 @@ def context_features(pairs: pl.DataFrame, p1: np.ndarray, s1n: pl.DataFrame, poo
         addr_sim = np.nan_to_num(sf["cc_jac"], nan=0.0)
         hn_a, hn_b = e2.codes["a_hn"][ca], e2.codes["a_hn"][cb]
         hn_same = np.where((hn_a > 0) & (hn_b > 0), (hn_a == hn_b).astype(np.float32), np.nan)
-        names = np.asarray(pooln["n_core"].to_list(), dtype=object)
-        nsim = _cpdist(names[ca], names[cb], fuzz.token_set_ratio, cfg.n_jobs, cfg.chunk_rows) / 100.0
+        na_ = pooln["n_core"].gather(ca).to_numpy().astype(object)
+        nb_ = pooln["n_core"].gather(cb).to_numpy().astype(object)
+        nsim = _cpdist(na_, nb_, fuzz.token_set_ratio, cfg.n_jobs, cfg.chunk_rows) / 100.0
         w = p[b_pair]
         opp = (e2.source[ca] != e2.source[cb])
         # aggregate per pair

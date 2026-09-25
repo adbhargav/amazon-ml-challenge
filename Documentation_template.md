@@ -1,6 +1,6 @@
 # ML Challenge 2026: Business Entity Resolution Solution
 
-**Team Name:** [Your Team Name]  
+**Team Name:** vajra  
 **Team Members:** [List all team members]  
 **Submission Date:** 2026-09-25
 

@@ -22,6 +22,7 @@ def h(s: str) -> float:
 ap = argparse.ArgumentParser()
 ap.add_argument("--src", default="dataset/train"); ap.add_argument("--states", default="work/states")
 ap.add_argument("--out", default="dataset_state"); ap.add_argument("--frac", type=float, default=0.15)
+ap.add_argument("--must", default="", help="states always included, e.g. India:DL,India:KA,US:TX")
 a = ap.parse_args()
 out = os.path.join(a.out, "train"); os.makedirs(out, exist_ok=True)
 
@@ -31,6 +32,10 @@ for country in s1["country"].unique().to_list():
     cnt = s1.filter(pl.col("country") == country).group_by("a_state").len().sort("len", descending=True)
     total = cnt["len"].sum(); states = [(h(country + "|" + s), s, n) for s, n in zip(cnt["a_state"], cnt["len"]) if s != ""]
     acc, sel = 0, []
+    must = {m.split(":")[1] for m in a.must.split(",") if m and m.split(":")[0] == country}
+    for _, s, n in sorted(states):
+        if s in must: sel.append(s); acc += n
+    states = [t for t in states if t[1] not in must]
     for _, s, n in sorted(states):
         if acc >= a.frac * total: break
         sel.append(s); acc += n

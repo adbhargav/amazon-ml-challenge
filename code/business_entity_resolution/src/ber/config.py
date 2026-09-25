@@ -21,6 +21,7 @@ class Config:
     work_dir: str = "work"              # parquet caches, models, reports
     output_dir: str = "output"          # matching_results.tsv / candidate_pairs.tsv
     mode: str = "train"                 # "train" (with OOF validation) or "test"
+    normalizer_dir: Optional[str] = None  # train mode: load a pre-fitted normaliser (e.g. fitted on the full split) instead of fitting
 
     # ---- reproducibility / resources --------------------------------------
     seed: int = 2026

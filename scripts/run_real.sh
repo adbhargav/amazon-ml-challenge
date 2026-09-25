@@ -4,7 +4,7 @@
 #   2. --mode test once per country shard (scripts/split_test_by_country.sh); blocking never
 #      pairs across countries, so the union of the shard outputs equals one big run
 #   3. concatenate shard outputs into output/, validate, package
-# usage: [TRAIN_DIR=dataset_state] scripts/run_real.sh <team_name> [extra --set overrides...]
+# usage: [TRAIN_DIR=dataset_state] [NORMALIZER_DIR=work/normalizer_full] scripts/run_real.sh <team_name> [extra --set overrides...]
 set -euo pipefail
 TEAM="${1:?usage: $0 <team_name> [--set key=value ...]}"; shift || true
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"; cd "$ROOT"
@@ -20,7 +20,8 @@ mkdir -p work output_shards output
 
 TRAIN_DIR="${TRAIN_DIR:-dataset_small}"
 echo "### $(date) train on $TRAIN_DIR"
-"$PY" "$PIPE" --mode train --data-dir "$TRAIN_DIR" --work-dir work "${COMMON[@]}" "$@" 2>&1 | tee work/train.log
+NORM=(); [[ -n "${NORMALIZER_DIR:-}" ]] && NORM=(--set "normalizer_dir=$NORMALIZER_DIR")
+"$PY" "$PIPE" --mode train --data-dir "$TRAIN_DIR" --work-dir work "${COMMON[@]}" "${NORM[@]}" "$@" 2>&1 | tee work/train.log
 
 for C in France US India; do
   [[ -d dataset_shards/$C/test ]] || continue

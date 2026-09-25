@@ -115,7 +115,11 @@ def stage_normalize(cfg: Config) -> None:
     pool = load_parquet(cfg.work / "pool.parquet")
     nd = cfg.models_dir / "normalizer"
     if cfg.mode == "train":
-        norm = Normalizer.fit(s1, pool, _load_gt(cfg), cfg)
+        if cfg.normalizer_dir:
+            log.info("loading pre-fitted normaliser from %s", cfg.normalizer_dir)
+            norm = Normalizer.load(Path(cfg.normalizer_dir))
+        else:
+            norm = Normalizer.fit(s1, pool, _load_gt(cfg), cfg)
         norm.save(nd)
     else:
         norm = Normalizer.load(nd)

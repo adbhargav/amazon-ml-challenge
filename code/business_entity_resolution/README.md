@@ -93,12 +93,33 @@ the documented noise catalogue; it is what the tests and the runtime benchmark u
 
 ## 5. Resources and runtime
 
-The pipeline is CPU only.  Memory-heavy steps are partitioned by country and state.
-Measured on a 4-core / 15 GB container with an 80k-S1 / 300k-pool synthetic split
-(see `../../README.md` for the table) and extrapolated to the real 1.7M / 10M test
-split it needs about 64 GB RAM and 16+ cores for a few hours per mode.  Knobs that
-trade recall for time: `k_name`, `k_name_addr`, `k_addr`, `k_reverse`, `prune_top_k`,
-`tfidf_max_df`, `gbdt_max_train_pairs`, `n_jobs`.
+The pipeline is CPU only.  Blocking runs inside (country, state) partitions and every
+pair-level stage streams through chunked parquet stores, so memory is bounded by
+`chunk_rows` plus the models' training subsample (`prune_max_train_pairs`,
+`gbdt_max_train_pairs`).
+
+Measured on a 4-core / 15 GB container with a synthetic split of 80k train S1
+(387k records, 68k queried, 4.8M union pairs) and 40k test S1 (190k records):
+
+| stage | train | test |
+| --- | ---: | ---: |
+| normalize + encode | 22 s | 9 s |
+| block (5 paths, union) | 53 s | 25 s |
+| prune (cheap features + 5-fold GBDT) | 412 s | 65 s |
+| features (~70 columns on 406k pairs) | 4 s | 2 s |
+| stage-1 GBDT | 91 s | 4 s |
+| context + stage-2 GBDT + calibration | 88 s | 5 s |
+| decide (grid search / apply) | 85 s | 1 s |
+| **total** | **12 min 40 s** | **1 min 54 s** |
+
+Validation macro F0.5 on that run: 0.978 (OOF); 0.976 on the hidden synthetic test
+truth; candidate recall 99.2% at 6 candidates per S1.
+
+Extrapolated to the real data (2.2M / 1.7M S1, 10M pool records) with 16+ cores and
+64 GB RAM: a few hours for `--mode train`, about an hour for `--mode test`.  Knobs
+that trade recall for time: `k_name`, `k_name_addr`, `k_addr`, `k_reverse`,
+`prune_top_k`, `tfidf_max_df`, `exact_block_cap`, `gbdt_max_train_pairs`, `n_jobs`.
+If RAM is short, lower `chunk_rows`, `prune_max_train_pairs` and `gbdt_max_train_pairs`.
 
 ## 6. Source layout
 

@@ -72,8 +72,9 @@ validation (15% of S1 hidden so their records act as distractors).
 
 * Built and validated end-to-end on synthetic data that reproduces the documented noise
   catalogue (the real data cannot be downloaded from the environment this was developed
-  in).  On the synthetic test split the pipeline scores macro F0.5 ≈ 0.98 and the
-  official validator passes; France (absent from training) is matched at the same rate
-  as the training countries.
+  in).  On an 80k/40k-S1 synthetic split the pipeline scores macro F0.5 = 0.976 on the
+  hidden test truth (0.978 OOF validation), the official validator passes, and France
+  (absent from training) is matched at the same rate as the training countries.
+  Runtime on 4 cores: 12.7 min train, 1.9 min test (table in the code README).
 * See `docs/STRATEGY.md` for the measured facts about the real data the design is built
   on, the priority list for the remaining time, and the leaderboard-probing plan.

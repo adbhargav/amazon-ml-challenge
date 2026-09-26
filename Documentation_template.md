@@ -29,7 +29,9 @@ A first version trained on a random 14% sample of the entities scored 0.988 on i
 validation but only 0.9275 on the public leaderboard: random sampling had thinned the
 pool 7× and with it the number of same-street, similar-name neighbours each entity
 competes with, so the models merged "twins" that only differ by house number and one
-word.  The state-based subsample of §2.3 removes that gap between validation and test.
+word.  The state-based subsample of §2.3 closes most of that gap: this version scores
+**0.9426 on the public leaderboard** (rank 826), i.e. +1.5 points on the same test
+data, with 3.7 points of validation-to-leaderboard gap remaining (§5).
 
 ---
 
@@ -224,8 +226,25 @@ for a plain 0.5 threshold without one-to-one); the parameters are stored in
   Predicted singleton rate 5.95% vs 5.55% true.  On the test set the pipeline outputs
   5,476,546 matches (3.16 per S1) and leaves 6.4% of S1 empty (France 6.0%, US 6.2%,
   India 6.6%) — the same profile as in training, including for the unseen country.
-  Public leaderboard: 0.9275 for the first version (random-entity subsample, §1);
-  [fill for this version].
+  Public leaderboard: **0.9426** (rank 826) for this version; 0.9275 for the first
+  version (random-entity subsample, §1).
+
+  | version | training subsample | own validation | public LB | gap |
+  | --- | --- | ---: | ---: | ---: |
+  | v1 | random 14% of entities | 0.988 | 0.9275 | 6.0 |
+  | v3 (this) | whole states, full-split normaliser | 0.979 | 0.9426 | 3.7 |
+
+  The remaining gap is not explained by the validation itself (it already hides 15%
+  of the entities, which brings the pool-to-queried-entity ratio to 5.6 against 5.75
+  in the test split).  Two things the validation cannot see are the leading
+  suspects: **France** (15% of the test split, no ground truth at all — a French
+  macro F0.5 of ~0.74 with US/India at their validation level would produce exactly
+  0.943) and **states outside the nine training states** (the models are trained
+  and validated on the same nine states; Telugu, Bengali, Malayalam and Gurmukhi
+  candidates were never seen by the GBDTs, only by the transliteration dictionary).
+  A per-country probe (upload the same file with the French matches removed; the
+  difference divided by the French share of S1 gives the French score) is the next
+  submission.
 - **Why the first version over-scored its own validation:** a random 14% sample of
   entities keeps only 14% of the pool, so each kept entity had 5× fewer same-street
   look-alikes than in the full data (0.37 vs 1.84 per S1 in the US).  Its models

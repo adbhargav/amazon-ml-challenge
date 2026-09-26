@@ -43,6 +43,12 @@ in this repository).  The pipeline design is built on them.
    loose).
 2. Submit once; note public LB vs validation.  Submit the `hidden_frac = 0` variant to
    learn which validation setting tracks the LB.
+   *Done for v1 and v3:* random-entity subsample 0.988 val → 0.9275 LB; whole-state
+   subsample 0.979 val → 0.9426 LB (rank 826).  The remaining 3.7-point gap lives in
+   what the validation cannot measure, so the next probes are per-country: upload the
+   v3 file with the French matches removed (France = 15% of test S1, never validated;
+   the score difference / 0.15 is the French macro F0.5 up to the singleton share),
+   then the same for the Indian states outside the nine training states.
 3. Error analysis from `errors_fp.tsv` / `errors_fn.tsv`: bucket by script / domain /
    alias / number mismatch / empty address; add targeted features or lexicon entries.
 4. Optional neural boost if a GPU is available (all MIT, < 1B parameters):

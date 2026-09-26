@@ -24,3 +24,5 @@ work_shards/
 output_shards/
 student_resource/
 .DS_Store
+dataset_state/
+backup_v*/
